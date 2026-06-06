@@ -1,9 +1,0 @@
-﻿git : Everything up-to-date
-En línea: 1 Carácter: 443
-+ ... git_commit_status.txt }; $pushOut = git push origin HEAD 2>&1 | Out-S ...
-+                                         ~~~~~~~~~~~~~~~~~~~~~~~~~
-    + CategoryInfo          : NotSpecified: (Everything up-to-date:String) [], 
-    RemoteException
-    + FullyQualifiedErrorId : NativeCommandError
- 
-
