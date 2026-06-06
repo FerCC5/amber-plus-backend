@@ -5,6 +5,7 @@ import * as userService from '../services/userService.js'
 import { optionalAuth } from '../middleware/optionalAuth.js'
 
 const router = Router()
+const MAX_ALERTS_PER_DAY = Number(process.env.ALERTS_PER_DAY_LIMIT || 15)
 
 const AlertSchema = z.object({
   child_name: z.string().min(2).max(255),
@@ -37,6 +38,13 @@ router.get('/:id', (req, res, next) => {
 
 router.post('/', (req, res, next) => {
   try {
+    const currentCount = alertService.countAlertsCreatedToday()
+    if (currentCount >= MAX_ALERTS_PER_DAY) {
+      return res.status(429).json({
+        error: `Límite de ${MAX_ALERTS_PER_DAY} alertas por día alcanzado. Intenta de nuevo mañana.`
+      })
+    }
+
     const data = AlertSchema.parse(req.body)
     const alert = alertService.createAlert(data)
     res.status(201).json(alert)

@@ -5,6 +5,7 @@ export const listAlerts = store.listAlerts
 export const getAlert = store.getAlert
 export const getAlertDetail = store.getAlertDetail
 export const createAlert = store.createAlert
+export const countAlertsCreatedToday = store.countAlertsCreatedToday
 export const updateAlertStatus = store.updateAlertStatus
 export const updateAlertPhoto = store.updateAlertPhoto
 export const updateAlertBlockchain = store.updateAlertBlockchain

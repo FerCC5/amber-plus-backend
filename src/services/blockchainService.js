@@ -24,19 +24,23 @@ export function getTreasuryAddress() {
 export function getBlockchainConfig() {
   const network = process.env.ALCHEMY_NETWORK || 'base-sepolia'
   const treasury = getTreasuryAddress()
+  const contract = process.env.CONTRACT_ADDRESS?.trim() || null
   const alchemy = isBlockchainConfigured()
-  const livePayments = Boolean(alchemy && treasury)
+
+  let payments_mode = 'simulated'
+  if (alchemy && treasury) payments_mode = 'live'
+  else if (contract) payments_mode = 'on-chain'
 
   return {
     treasury_address: treasury,
-    contract_address: process.env.CONTRACT_ADDRESS?.trim() || null,
+    contract_address: contract,
     network,
     network_name: NETWORK_NAMES[network] || network,
     chain_id: CHAIN_IDS[network] || 84532,
     micro_tx_eth: process.env.MICRO_TX_ETH || '0.00015',
     micro_tx_usd: Number(process.env.MICRO_TX_USD || 0.45),
     alchemy_configured: alchemy,
-    payments_mode: livePayments ? 'live' : 'simulated'
+    payments_mode
   }
 }
 

@@ -45,16 +45,19 @@ router.post('/register', async (req, res, next) => {
 
     let registration
 
-    if (isBlockchainConfigured() && getTreasuryAddress()) {
+    const contractAddr = process.env.CONTRACT_ADDRESS?.trim()
+    const treasuryAddr = getTreasuryAddress()
+
+    if (isBlockchainConfigured() && treasuryAddr) {
       if (!tx_hash) {
         return res.status(400).json({
-          error: 'tx_hash requerido. Paga la microtransacción desde tu wallet y envía el hash.'
+          error: 'tx_hash requerido. Confirma la transacción en MetaMask y vuelve a intentar.'
         })
       }
       const microEth = process.env.MICRO_TX_ETH || '0.00015'
       const minWei = (ethToWei(microEth) * 95n) / 100n
       const verification = await verifyTransaction(tx_hash, {
-        expectedTo: getTreasuryAddress(),
+        expectedTo: contractAddr || treasuryAddr,
         minValueWei: minWei
       })
       if (!verification.verified) {
@@ -65,6 +68,13 @@ router.post('/register', async (req, res, next) => {
         alert_id: `AP-${alert_id.slice(0, 8).toUpperCase()}`,
         simulated: false,
         verification
+      }
+    } else if (contractAddr && tx_hash && /^0x[a-fA-F0-9]{64}$/.test(tx_hash)) {
+      registration = {
+        tx_hash,
+        alert_id: `AP-${alert_id.slice(0, 8).toUpperCase()}`,
+        simulated: false,
+        verification: null
       }
     } else {
       registration = generateSimulatedRegistration()
@@ -84,8 +94,10 @@ router.post('/register', async (req, res, next) => {
       simulated: registration.simulated,
       verification: registration.verification || null,
       message: registration.simulated
-        ? 'Alerta registrada (modo simulación — configura ALCHEMY_API_KEY para verificación real)'
-        : 'Alerta verificada y registrada en blockchain'
+        ? 'Alerta registrada (modo simulación — configura CONTRACT_ADDRESS en .env)'
+        : registration.verification
+          ? 'Alerta verificada y registrada en blockchain'
+          : 'Alerta registrada on-chain (añade ALCHEMY_API_KEY para verificación automática)'
     })
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message })

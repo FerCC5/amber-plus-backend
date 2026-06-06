@@ -150,6 +150,15 @@ export function listAlerts({ status = 'active', limit = 20, offset = 0 } = {}) {
   }
 }
 
+export function countAlertsCreatedOnDay(day) {
+  return [...alerts.values()].filter((a) => a.created_at?.slice(0, 10) === day).length
+}
+
+export function countAlertsCreatedToday() {
+  const today = new Date().toISOString().slice(0, 10)
+  return countAlertsCreatedOnDay(today)
+}
+
 export function getAlert(id) {
   return alerts.get(id) || null
 }
@@ -171,7 +180,7 @@ export function createAlert(data) {
   const alert = {
     id,
     ...data,
-    status: 'active',
+    status: 'pending',
     ai_priority_score: null,
     ai_authenticity_score: null,
     blockchain_tx_hash: null,
@@ -210,6 +219,9 @@ export function updateAlertBlockchain(id, blockchain_tx_hash, blockchain_alert_i
   if (!alert) return null
   alert.blockchain_tx_hash = blockchain_tx_hash
   alert.blockchain_alert_id = blockchain_alert_id
+  if (alert.status === 'pending') {
+    alert.status = 'active'
+  }
   alert.updated_at = now()
   persist()
   return alert

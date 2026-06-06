@@ -1,4 +1,4 @@
-const API = '/api'
+const API = window.API || '/api'
 
 let alertsDB = []
 let communityUSD = 0
@@ -42,6 +42,7 @@ function fromApiAlert(a) {
     contacto: `${a.contact_name} · ${a.contact_phone}`,
     foto: a.photo_url || '',
     timestamp: ts,
+    lastSeenAt: a.last_seen_at || a.created_at || '',
     status: resolved ? 'resolved' : 'active',
     resolvedAt: a.resolved_at ? new Date(a.resolved_at).getTime() : null,
     microAmount: blockchainConfig?.micro_tx_usd || 0.45,
@@ -94,7 +95,7 @@ async function uploadAlertPhoto(file, alertId) {
 }
 
 async function loadAlertsFromApi() {
-  const { alerts } = await apiFetch('/alerts?status=all&limit=100')
+  const { alerts } = await apiFetch('/alerts?status=all&limit=200')
   alertsDB = (alerts || []).map(fromApiAlert)
   computeWeeklyResolved()
 }
@@ -135,13 +136,17 @@ function updateWalletUI() {
   const account = AmberWallet.getConnectedAccount()
   const mode = blockchainConfig?.payments_mode || 'simulated'
   const network = blockchainConfig?.network_name || '—'
+  const modeLabel =
+    mode === 'live' ? 'contrato + Alchemy' : mode === 'on-chain' ? 'contrato (MetaMask)' : 'simulación'
 
   if (account) {
-    statusEl.textContent = `${AmberWallet.shortAddress(account)} · ${network} · ${mode === 'live' ? 'pagos reales' : 'modo simulación'}`
-    btn.textContent = 'Wallet conectada'
+    statusEl.textContent = `${AmberWallet.shortAddress(account)} · ${network} · ${modeLabel}`
+    btn.textContent = 'Desconectar wallet'
+    btn.classList.remove('btn-secundary')
   } else {
-    statusEl.textContent = `${network} · ${mode === 'live' ? 'conecta tu wallet para pagar' : 'modo simulación (sin treasury)'}`
+    statusEl.textContent = `${network} · ${modeLabel}`
     btn.textContent = 'Conectar wallet'
+    btn.classList.add('btn-secundary')
   }
 }
 
@@ -154,6 +159,21 @@ async function handleConnectWallet() {
   } catch (err) {
     showToastFenix(`❌ ${err.message}`, '#d9534f')
   }
+}
+
+async function handleToggleWallet() {
+  const acct = AmberWallet.getConnectedAccount()
+  if (acct) {
+    // disconnect
+    await AmberWallet.disconnectWallet()
+    // optional: remove server wallet binding token if present
+    // localStorage.removeItem('amberToken')
+    updateWalletUI()
+    showToastFenix('🔌 Wallet desconectada', '#f39c12')
+    return
+  }
+
+  await handleConnectWallet()
 }
 
 async function loadInitialData() {
@@ -196,28 +216,25 @@ function notifyAuthoritiesMultiLevel(alertData, isUrgent = false) {
   )
 }
 
-async function payMicroTransaction(amountUsd) {
-  const amountEth = blockchainConfig?.micro_tx_eth || '0.00015'
+function needsWalletForChain() {
+  const mode = blockchainConfig?.payments_mode
+  return mode === 'live' || mode === 'on-chain'
+}
 
-  if (blockchainConfig?.payments_mode === 'live' && !AmberWallet.getConnectedAccount()) {
+async function ensureWalletConnected() {
+  if (needsWalletForChain() && !AmberWallet.getConnectedAccount()) {
     await AmberWallet.connectWallet()
     updateWalletUI()
   }
+}
 
-  const payment = await AmberWallet.sendEthPayment(amountEth)
+function applyMicroTxGamification(amountUsd) {
   const communityShare = amountUsd * 0.5
   communityUSD += communityShare
   const tokensGenerated = Math.floor(amountUsd * 10)
   totalTokensEmitidos += tokensGenerated
   saveGamificationLocal()
-
-  return {
-    success: true,
-    communityAdded: communityShare,
-    tokens: tokensGenerated,
-    txHash: payment.txHash,
-    simulated: payment.simulated
-  }
+  return { communityShare, tokensGenerated }
 }
 
 async function createFenixAlert(event) {
@@ -238,11 +255,11 @@ async function createFenixAlert(event) {
   }
 
   const amountUsd = blockchainConfig?.micro_tx_usd || 0.45
+  const amountEth = blockchainConfig?.micro_tx_eth || '0.0015'
   btn.disabled = true
-  showToastFenix(`💸 Procesando microtransacción solidaria $${amountUsd} USD...`, '#5bc0de')
+  showToastFenix('📡 Guardando alerta en el servidor...', '#5bc0de')
 
   try {
-    const tx = await payMicroTransaction(amountUsd)
     const { name, phone } = parseContact(contacto)
     const body = {
       child_name: nombre,
@@ -259,36 +276,58 @@ async function createFenixAlert(event) {
       body: JSON.stringify(body)
     })
 
+    let ipfsHash = created.photo_ipfs_hash || ''
     if (fotoFile) {
       try {
         const uploaded = await uploadAlertPhoto(fotoFile, created.id)
         created.photo_url = uploaded.photo_url
+        ipfsHash = uploaded.ipfs_hash || ipfsHash
       } catch (uploadErr) {
         showToastFenix(`⚠️ Alerta creada pero la foto falló: ${uploadErr.message}`, '#f0ad4e')
       }
     }
 
+    await ensureWalletConnected()
+    showToastFenix(
+      `💸 Alerta creada como pendiente. Confirma en MetaMask ~${amountEth} ETH para activarla.`,
+      '#5bc0de'
+    )
+
+    const payment = await AmberWallet.registerAlertOnChain({
+      alertUuid: created.id,
+      ipfsHash: ipfsHash || undefined,
+      amountEth
+    })
+
+    const { communityShare, tokensGenerated } = applyMicroTxGamification(amountUsd)
+
+    let registrationSuccess = false
     try {
       await apiFetch('/blockchain/register', {
         method: 'POST',
         body: JSON.stringify({
           alert_id: created.id,
-          tx_hash: tx.txHash
+          tx_hash: payment.txHash
         })
       })
+      registrationSuccess = true
+      created.status = 'active'
+      created.blockchain_tx_hash = payment.txHash
     } catch (chainErr) {
-      showToastFenix(`⚠️ Alerta guardada; registro blockchain: ${chainErr.message}`, '#f0ad4e')
+      showToastFenix(`⚠️ Alerta guardada, pero la confirmación en blockchain falló: ${chainErr.message}`, '#f0ad4e')
     }
 
-    const newAlert = fromApiAlert(created)
-    newAlert.microAmount = amountUsd
-    newAlert.blockchainTx = tx.txHash
-    alertsDB.unshift(newAlert)
-    notifyAuthoritiesMultiLevel(newAlert, true)
+    if (registrationSuccess) {
+      const newAlert = fromApiAlert(created)
+      newAlert.microAmount = amountUsd
+      newAlert.blockchainTx = payment.txHash
+      alertsDB.unshift(newAlert)
+      notifyAuthoritiesMultiLevel(newAlert, true)
+    }
 
-    const modeNote = tx.simulated ? ' (tx simulada)' : ` · tx ${tx.txHash.slice(0, 10)}…`
+    const modeNote = payment.simulated ? ' (tx simulada)' : ` · tx ${payment.txHash.slice(0, 10)}…`
     showToastFenix(
-      `✅ Alerta para ${nombre} guardada${modeNote}. Fondo +$${tx.communityAdded.toFixed(2)} USD, +${tx.tokens} Tokens.`,
+      `✅ Alerta para ${nombre} guardada${modeNote}. Fondo +$${communityShare.toFixed(2)} USD, +${tokensGenerated} Tokens.`,
       '#2ECC71'
     )
     document.getElementById('fenixForm').reset()
@@ -323,12 +362,12 @@ async function submitDonation(event) {
   showToastFenix('💸 Enviando donación desde tu wallet...', '#5bc0de')
 
   try {
-    if (blockchainConfig?.payments_mode === 'live' && !AmberWallet.getConnectedAccount()) {
-      await AmberWallet.connectWallet()
-      updateWalletUI()
-    }
+    await ensureWalletConnected()
 
-    const payment = await AmberWallet.sendEthPayment(String(amountEth))
+    const payment = await AmberWallet.donateOnChain({
+      amountEth: String(amountEth),
+      alertUuid: alertSelect?.value || undefined
+    })
     const donor = AmberWallet.getConnectedAccount() || payment.from
 
     await apiFetch('/community/donations', {
@@ -441,6 +480,40 @@ function escapeHtml(str) {
     .replace(/"/g, '&quot;')
 }
 
+function openAlertModal(alert) {
+  const modal = document.getElementById('alertDetailModal')
+  if (!modal) return
+  modal.querySelector('.modal-title').textContent = `${alert.nombre}, ${alert.edad} años`
+  modal.querySelector('#alertDetailStatus').textContent = alert.status === 'active' ? 'ACTIVA' : alert.status.toUpperCase()
+  modal.querySelector('#alertDetailTime').textContent = alert.timestamp
+    ? new Date(alert.timestamp).toLocaleString()
+    : 'Sin fecha'
+  modal.querySelector('#alertDetailName').textContent = alert.nombre
+  modal.querySelector('#alertDetailAge').textContent = alert.edad
+  modal.querySelector('#alertDetailLocation').textContent = alert.ubicacion
+  modal.querySelector('#alertDetailLastSeen').textContent = alert.lastSeenAt ? new Date(alert.lastSeenAt).toLocaleString() : 'No disponible'
+  modal.querySelector('#alertDetailContact').textContent = alert.contacto
+  modal.querySelector('#alertDetailDescription').textContent = alert.descripcion
+  modal.querySelector('#alertDetailTx').textContent = alert.blockchainTx || 'No hay transacción'
+
+  const photoContainer = modal.querySelector('#alertDetailPhoto')
+  if (photoContainer) {
+    if (alert.foto) {
+      photoContainer.innerHTML = `<img src="${escapeHtml(alert.foto)}" alt="Foto de alerta" />`
+    } else {
+      photoContainer.innerHTML = '<div class="modal-no-photo">Sin foto disponible</div>'
+    }
+  }
+
+  modal.classList.remove('hidden')
+}
+
+function closeAlertModal() {
+  const modal = document.getElementById('alertDetailModal')
+  if (!modal) return
+  modal.classList.add('hidden')
+}
+
 function onPhotoSelected(event) {
   const file = event.target.files?.[0]
   const preview = document.getElementById('fotoPreview')
@@ -471,12 +544,52 @@ function renderFullUI() {
 
   populateDonationAlerts()
 
-  if (alertsDB.length === 0) {
+  const pendingAlerts = alertsDB.filter((a) => a.status === 'pending')
+
+  const pendingContainer = document.getElementById('pendingAlertsContainerFenix')
+  if (pendingContainer) {
+    if (pendingAlerts.length === 0) {
+      pendingContainer.style.display = 'none'
+      pendingContainer.innerHTML = ''
+    } else {
+      pendingContainer.style.display = 'block'
+      pendingContainer.innerHTML = `
+        <div style="background:#111b34;border:1px solid #FFB347;border-radius:1.2rem;padding:1rem;margin-bottom:1rem;">
+          <strong style="display:block;margin-bottom:0.5rem;color:#FFB347;">⚠️ Alertas pendientes de pago</strong>
+          <p style="margin:0;margin-bottom:0.75rem;font-size:0.85rem;color:#cbd3e1;">Hay ${pendingAlerts.length} alerta(s) creadas pero aún no confirmadas en MetaMask. No aparecerán como activas hasta que el pago se complete.</p>
+          <div id="pendingAlertsList" style="display:grid;gap:0.75rem;"></div>
+        </div>
+      `
+      const pendingList = pendingContainer.querySelector('#pendingAlertsList')
+      if (pendingList) {
+        pendingAlerts
+          .slice()
+          .sort((a, b) => b.timestamp - a.timestamp)
+          .forEach((alert) => {
+            const item = document.createElement('div')
+            item.className = 'alert-item-fenix'
+            item.style.cursor = 'pointer'
+            item.innerHTML = `
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;">
+                <strong>${escapeHtml(alert.nombre)}, ${alert.edad} años</strong>
+                <span class="badge-priority" style="background:#5bc0de;">⏳ PENDIENTE</span>
+              </div>
+              <div style="font-size:0.8rem;color:#cbd3e1;">📍 ${escapeHtml(alert.ubicacion)}</div>
+              <div style="font-size:0.75rem;color:#cbd3e1;">📝 ${escapeHtml(alert.descripcion.substring(0, 70))}</div>
+            `
+            item.addEventListener('click', () => openAlertModal(alert))
+            pendingList.appendChild(item)
+          })
+      }
+    }
+  }
+
+  if (activeAlerts.length === 0) {
     container.innerHTML =
-      '<div style="text-align:center;padding:1rem;">No hay alertas registradas.</div>'
+      '<div style="text-align:center;padding:1rem;">No hay alertas activas en este momento.</div>'
   } else {
     container.innerHTML = ''
-    alertsDB
+    activeAlerts
       .slice()
       .sort((a, b) => b.timestamp - a.timestamp)
       .forEach((alert) => {
@@ -523,9 +636,13 @@ function renderFullUI() {
           resolveBtn.className = 'btn-secundary'
           resolveBtn.style.cssText = 'margin-top:6px;padding:6px;'
           resolveBtn.textContent = '✅ MARCAR COMO APARECIÓ (bajar alerta)'
-          resolveBtn.addEventListener('click', () => resolveFenixAlert(alert.id))
+          resolveBtn.addEventListener('click', (evt) => {
+            evt.stopPropagation()
+            resolveFenixAlert(alert.id)
+          })
           item.appendChild(resolveBtn)
         }
+        item.addEventListener('click', () => openAlertModal(alert))
 
         container.appendChild(item)
       })
@@ -593,8 +710,12 @@ window.addEventListener('DOMContentLoaded', () => {
   loadInitialData().then(() => renderDonationsList())
   document.getElementById('fenixForm').addEventListener('submit', createFenixAlert)
   document.getElementById('donationForm')?.addEventListener('submit', submitDonation)
-  document.getElementById('btnConnectWallet')?.addEventListener('click', handleConnectWallet)
+  document.getElementById('btnConnectWallet')?.addEventListener('click', handleToggleWallet)
   document.getElementById('fotoDes')?.addEventListener('change', onPhotoSelected)
+  document.getElementById('alertDetailModalClose')?.addEventListener('click', closeAlertModal)
+  document.getElementById('alertDetailModal')?.addEventListener('click', (evt) => {
+    if (evt.target === evt.currentTarget) closeAlertModal()
+  })
   setInterval(() => {
     autoMonitorTwoHours()
   }, 45000)
